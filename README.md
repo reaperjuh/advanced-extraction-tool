@@ -219,14 +219,19 @@ If no extension or an unsupported extension is provided for the output file, it 
     Defaults to `"m,c,a,b"`.
 *   `-v, --verbose`: (Optional) Enables verbose output, showing more details about the processing steps.
 
-**Supported Artifacts (Current):**
+### Supported Artifacts
+The script currently supports parsing the following artifacts found within the input directory:
 
-*   **File System Metadata:** The script currently extracts and processes the following timestamps from files found in the input directory:
-    *   Modification Time (mtime)
-    *   Access Time (atime)
-    *   Metadata Change Time (ctime) - Note: On Windows, this is the Creation Time.
-    *   Birth/Creation Time (btime) - If available on the operating system (e.g., macOS, some Linux filesystems).
-*   **Future Support:** The script is designed to be extended. Parsers for specific Android artifacts like application databases (e.g., SMS, contacts), browser history, Logcat files, and more will be added in future updates. These will be integrated into the main file walk and event collection process.
+*   **File System Metadata:** Extracts Modification, Access, Change, and Birth times (if available via `os.stat()`) for all files.
+*   **SMS/MMS Messages (`mmssms.db`):**
+    *   Extracts sender/receiver address, message body (for SMS), type (sent/received), and primary and sent timestamps.
+    *   For MMS, extracts metadata like subject, message box type, and timestamps. (Full text content from MMS parts is a potential future enhancement).
+*   **Call Logs (`calllog.db`):**
+    *   Extracts caller/callee number and name (if available), call type (Incoming, Outgoing, Missed, etc.), duration, and timestamp.
+*   **Google Chrome History (`History` file, typically from `.../app_chrome/Default/`):**
+    *   Extracts visited URL, page title, visit count, and the last visit timestamp.
+
+The script identifies these database files by their common names (e.g., `mmssms.db`, `calllog.db`, `History`). Ensure the extracted artifact directory structure (from `artifact_extractor.py` or manual extraction) preserves these names. Parsers for additional artifacts are planned for future updates.
 
 **Examples:**
 
