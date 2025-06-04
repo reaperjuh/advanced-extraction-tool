@@ -9,6 +9,8 @@ import re # Added for parsing content query output
 import tarfile # Added for WhatsApp extraction
 from pathlib import Path # Added for more robust path handling
 import argparse # Added for CLI
+import sqlite3 # Added for Chrome parsing
+import json # Added for Chrome parsing
 
 # Global constants for tool paths - will be set by find_tool
 # These are not strictly used if instance variables are set correctly.
@@ -37,6 +39,11 @@ class AegisExtractor:
 
         # self.abe_jar_path = self._find_tool("abe.jar") # Found on demand in WhatsApp method
         # self.java_path = self._find_java_executable() # Found on demand in WhatsApp method
+
+        # Root status initialization
+        self.is_root = False
+        self.root_status_checked = False
+        self.root_enabled_by_script = False # Flag to track if this script instance enabled root
 
         if not self.adb_path:
             print("CRITICAL Error: adb (or adb.exe) not found. Please ensure it's in the script's directory, ./bin, your system PATH, or provide a valid path via --adb-path.")
@@ -1026,6 +1033,458 @@ class AegisExtractor:
         print(f"\nProcess finished. Any extracted WhatsApp files (key, msgstore.db, wa.db) are located in: {self.whatsapp_dir}")
         logging.info(f"WhatsApp guided extraction process finished. Files (if any) are in {self.whatsapp_dir}")
 
+
+    def extract_targeted_app_data(self, package_names_list=None):
+        logging.info("Starting targeted application data extraction...")
+        default_packages = ["com.android.chrome", "org.telegram.messenger", "com.facebook.katana"] # Example list
+
+        if package_names_list is None or not package_names_list:
+            logging.info(f"No specific package names provided. Using default list for targeted app data extraction: {default_packages}")
+            package_names_to_process = default_packages
+            if not self.is_root: # For non-root, default list might be too broad or fail often with adb backup
+                logging.warning("Running targeted app extraction with default list on a non-rooted device. Many backups might fail or yield no useful data.")
+                # Consider using a more restricted default list for non-root, or none at all.
+                # For now, will proceed with the same default list but users should be aware.
+        else:
+            logging.info(f"Using user-provided list for targeted app data extraction: {package_names_list}")
+            package_names_to_process = package_names_list
+
+        for package_name in package_names_to_process:
+            logging.info(f"Processing targeted data extraction for package: {package_name}")
+            print(f"\n[APP DATA] Attempting extraction for {package_name}...")
+
+            if self.is_root:
+                logging.info(f"Attempting ROOT-based extraction for {package_name}.")
+                package_root_data_dir = Path(self.output_dir) / "rooted_app_data" / package_name
+                data_data_dest = package_root_data_dir / "data_data"
+                data_media_dest = package_root_data_dir / "data_media_0"
+
+                os.makedirs(data_data_dest, exist_ok=True)
+                os.makedirs(data_media_dest, exist_ok=True)
+
+                # Pull /data/data/<package_name>
+                source_path_data = f"/data/data/{package_name}"
+                logging.info(f"Pulling (root): {source_path_data} to {data_data_dest}")
+                pull_data_cmd = [self.adb_path, "pull", source_path_data, str(data_data_dest.parent)] # Pull into parent of data_data_dest
+                pull_data_result = self._execute_adb_command(pull_data_cmd, timeout=900) # 15 mins
+                if pull_data_result and pull_data_result.returncode == 0:
+                    logging.info(f"Successfully pulled {source_path_data} to {data_data_dest.parent}")
+                    print(f"  [ROOT] Successfully pulled {source_path_data} to {data_data_dest.parent}")
+                else:
+                    logging.warning(f"Failed to pull {source_path_data}. RC: {pull_data_result.returncode if pull_data_result else 'N/A'}. Check logs.")
+                    print(f"  [ROOT] Failed to pull {source_path_data}. It might not exist or permissions denied despite root.")
+
+                # Pull /data/media/0/<package_name>
+                source_path_media = f"/data/media/0/{package_name}"
+                logging.info(f"Pulling (root): {source_path_media} to {data_media_dest}")
+                pull_media_cmd = [self.adb_path, "pull", source_path_media, str(data_media_dest.parent)]
+                pull_media_result = self._execute_adb_command(pull_media_cmd, timeout=900)
+                if pull_media_result and pull_media_result.returncode == 0:
+                    logging.info(f"Successfully pulled {source_path_media} to {data_media_dest.parent}")
+                    print(f"  [ROOT] Successfully pulled {source_path_media} to {data_media_dest.parent}")
+                else:
+                    logging.warning(f"Failed to pull {source_path_media}. RC: {pull_media_result.returncode if pull_media_result else 'N/A'}. This path may not exist for all apps.")
+                    print(f"  [ROOT] Failed to pull {source_path_media} or it does not exist.")
+
+            else: # Non-root fallback: ADB Backup
+                logging.info(f"Root access not available for {package_name}. Attempting non-root ADB backup (opportunistic).")
+                print("  [NON-ROOT] Root access not available. Attempting ADB backup (this is opportunistic and may not work for all apps or may yield limited data).")
+
+                package_backup_data_dir = Path(self.output_dir) / "app_backup_data" / package_name
+                os.makedirs(package_backup_data_dir, exist_ok=True)
+                adb_backup_file = package_backup_data_dir / f"{package_name}_backup.ab"
+
+                backup_command = [self.adb_path, "backup", "-f", str(adb_backup_file), "-noapk", package_name]
+                print(f"    Attempting ADB backup for {package_name}. Please CONFIRM the backup on your device if prompted (no password needed).")
+
+                backup_result = self._execute_adb_command(backup_command, timeout=900) # 15 mins
+
+                if backup_result is None or backup_result.returncode != 0 or not adb_backup_file.exists() or adb_backup_file.stat().st_size == 0:
+                    logging.error(f"ADB backup for {package_name} failed or produced an empty/invalid file. RC: {backup_result.returncode if backup_result else 'N/A'}")
+                    if adb_backup_file.exists(): logging.error(f"Backup file size for {package_name}: {adb_backup_file.stat().st_size}")
+                    print(f"    Error: ADB backup for {package_name} failed or was cancelled. Some apps do not allow backup.")
+                    continue # Skip to next package
+
+                logging.info(f"ADB backup successful for {package_name}: {adb_backup_file} (Size: {adb_backup_file.stat().st_size} bytes)")
+                print(f"    ADB backup for {package_name} appears successful: {adb_backup_file.name}")
+
+                # Unpack using ABE
+                java_path = self._find_java_executable()
+                abe_jar_path_str = self._find_tool("abe.jar")
+                abe_jar_path = Path(abe_jar_path_str) if abe_jar_path_str else None
+
+                if not java_path or not (abe_jar_path and abe_jar_path.exists()):
+                    logging.warning(f"Java or abe.jar not found. Skipping unpacking of {adb_backup_file.name}. The .ab file is saved.")
+                    print(f"    Warning: Java or abe.jar not found. Cannot unpack {adb_backup_file.name}. The raw backup file is saved.")
+                    continue
+
+                unpacked_tar_file = package_backup_data_dir / f"{package_name}_backup.tar"
+                unpack_cmd = [java_path, "-jar", str(abe_jar_path), "unpack", str(adb_backup_file), str(unpacked_tar_file)]
+                logging.info(f"Attempting to unpack {adb_backup_file.name} using: {' '.join(unpack_cmd)}")
+                print(f"    Attempting to unpack {adb_backup_file.name}...")
+
+                try:
+                    process = subprocess.run(unpack_cmd, capture_output=True, text=True, timeout=300, check=False, errors='ignore')
+                    if not (process.returncode == 0 and unpacked_tar_file.exists() and unpacked_tar_file.stat().st_size > 0):
+                        logging.error(f"Failed to unpack {adb_backup_file.name} with abe.jar. RC: {process.returncode}. STDOUT: {process.stdout.strip()}. STDERR: {process.stderr.strip()}")
+                        print(f"    Error: Failed to unpack {adb_backup_file.name}. Check logs. The .ab file is saved.")
+                        continue
+                    logging.info(f"Successfully unpacked {adb_backup_file.name} to .tar.")
+                    print(f"    Successfully unpacked {adb_backup_file.name} to {unpacked_tar_file.name}.")
+
+                    # Extract from TAR
+                    extract_to_dir = package_backup_data_dir / "_unpacked_tar_contents"
+                    os.makedirs(extract_to_dir, exist_ok=True)
+                    logging.info(f"Extracting contents of {unpacked_tar_file.name} to {extract_to_dir}")
+                    print(f"    Extracting files from {unpacked_tar_file.name} into _unpacked_tar_contents/ folder...")
+                    with tarfile.open(unpacked_tar_file, "r") as tar:
+                        for member in tar.getmembers(): # Safer extraction
+                            member_path_in_tar = Path(member.name)
+                            # Ensure the path is relative and does not try to escape the extraction directory
+                            # Create a safe target path
+                            target_path = extract_to_dir.joinpath(*member_path_in_tar.parts).resolve()
+                            if not target_path.is_relative_to(extract_to_dir.resolve()):
+                                logging.warning(f"Skipping potentially unsafe path in TAR for {package_name}: {member.name}")
+                                continue
+
+                            if member.isfile():
+                                os.makedirs(target_path.parent, exist_ok=True)
+                                with tar.extractfile(member) as source, open(target_path, "wb") as dest:
+                                    shutil.copyfileobj(source, dest)
+                            elif member.isdir():
+                                os.makedirs(target_path, exist_ok=True)
+
+                    logging.info(f"TAR extraction complete for {package_name} into {extract_to_dir}.")
+                    print(f"    Extraction from TAR complete. Data saved in: {extract_to_dir}")
+                    # Optional: Clean up .tar file
+                    # if unpacked_tar_file.exists(): os.remove(unpacked_tar_file)
+
+                except subprocess.TimeoutExpired:
+                    logging.error(f"Timeout expired while unpacking {adb_backup_file.name}.")
+                    print(f"    Error: Timeout unpacking {adb_backup_file.name}. The .ab file is saved.")
+                except tarfile.TarError as e:
+                    logging.error(f"Error extracting tar file for {package_name}: {e}", exc_info=True)
+                    print(f"    Error: Could not extract from {unpacked_tar_file.name}. It might be corrupted.")
+                except Exception as e:
+                    logging.error(f"An exception occurred during ABE unpacking or TAR extraction for {package_name}: {e}", exc_info=True)
+                    print(f"    An error occurred during unpacking/extraction for {package_name}: {e}")
+
+        logging.info("Targeted application data extraction process completed.")
+        print("\n[APP DATA] Targeted application data extraction finished.")
+
+
+    def _parse_chrome_bookmarks_recursive(self, node, path_parts, bookmarks_list):
+        """Helper function to recursively parse Chrome bookmark nodes."""
+        if node.get('type') == 'url':
+            bookmarks_list.append({
+                'name': node.get('name', ''),
+                'url': node.get('url', ''),
+                'folder_path': '/'.join(path_parts)
+            })
+        elif node.get('type') == 'folder':
+            current_path = path_parts + [node.get('name', 'Unnamed Folder')]
+            for child in node.get('children', []):
+                self._parse_chrome_bookmarks_recursive(child, current_path, bookmarks_list)
+
+    def parse_chrome_data(self, package_name="com.android.chrome"):
+        logging.info(f"Starting Chrome data parsing for package: {package_name}")
+        print(f"\n[CHROME PARSER] Attempting to parse data for {package_name}...")
+
+        parsed_app_output_dir = Path(self.output_dir) / "parsed_app_data" / package_name
+        os.makedirs(parsed_app_output_dir, exist_ok=True)
+
+        # Determine Chrome Profile Path from previously extracted data
+        profile_path_candidates = [
+            Path(self.output_dir) / "rooted_app_data" / package_name / "data_data" / "app_chrome" / "Default",
+            Path(self.output_dir) / "app_backup_data" / package_name / "_unpacked_tar_contents" / "apps" / package_name / "app_chrome" / "Default",
+            # Fallback for some structures where 'Default' might be directly under 'app_webview' or 'files'
+            Path(self.output_dir) / "rooted_app_data" / package_name / "data_data" / "app_webview" / "Default",
+            Path(self.output_dir) / "app_backup_data" / package_name / "_unpacked_tar_contents" / "apps" / package_name / "app_webview" / "Default",
+        ]
+
+        profile_path = None
+        for candidate in profile_path_candidates:
+            # A more reliable check might be for multiple key files, e.g., History and Bookmarks
+            if candidate.exists() and (candidate / "History").exists():
+                profile_path = candidate
+                logging.info(f"Found Chrome profile directory for {package_name} at: {profile_path}")
+                print(f"  Found Chrome profile directory: {profile_path}")
+                break
+
+        if not profile_path:
+            logging.warning(f"Chrome profile directory ('Default') not found for {package_name} in expected extracted locations. Skipping Chrome parsing.")
+            print(f"  Warning: Chrome profile directory not found for {package_name}. Cannot parse Chrome data.")
+            return
+
+        # 1. Parse History SQLite Database
+        history_db_path = profile_path / "History"
+        history_csv_path = parsed_app_output_dir / "chrome_history.csv"
+        if history_db_path.exists():
+            logging.info(f"Parsing Chrome History from: {history_db_path}")
+            try:
+                conn = sqlite3.connect(f"file:{history_db_path}?mode=ro", uri=True) # Read-only connection
+                cursor = conn.cursor()
+                query = """
+                    SELECT
+                        datetime(last_visit_time/1000000-11644473600, 'unixepoch', 'localtime') AS last_visit_time,
+                        url,
+                        title,
+                        visit_count,
+                        typed_count
+                    FROM urls
+                    ORDER BY last_visit_time DESC;
+                """
+                cursor.execute(query)
+                rows = cursor.fetchall()
+                headers = ["last_visit_time", "url", "title", "visit_count", "typed_count"]
+                with open(history_csv_path, 'w', newline='', encoding='utf-8') as csvfile:
+                    writer = csv.writer(csvfile)
+                    writer.writerow(headers)
+                    writer.writerows(rows)
+                logging.info(f"Chrome History successfully parsed to {history_csv_path} ({len(rows)} rows).")
+                print(f"  Successfully parsed Chrome History to {history_csv_path.name} ({len(rows)} rows).")
+            except sqlite3.Error as e:
+                logging.error(f"SQLite error while parsing Chrome History {history_db_path}: {e}", exc_info=True)
+                print(f"  Error: Could not parse Chrome History database: {e}")
+            except Exception as e:
+                logging.error(f"Unexpected error parsing Chrome History {history_db_path}: {e}", exc_info=True)
+                print(f"  Error: Unexpected issue parsing Chrome History: {e}")
+            finally:
+                if 'conn' in locals() and conn:
+                    conn.close()
+        else:
+            logging.warning(f"Chrome History file not found at: {history_db_path}")
+            print(f"  Warning: Chrome History file not found at expected location.")
+
+        # 2. Parse Bookmarks JSON File
+        bookmarks_file_path = profile_path / "Bookmarks"
+        bookmarks_csv_path = parsed_app_output_dir / "chrome_bookmarks.csv"
+        bookmarks_json_dump_path = parsed_app_output_dir / "chrome_bookmarks_full.json"
+        if bookmarks_file_path.exists():
+            logging.info(f"Parsing Chrome Bookmarks from: {bookmarks_file_path}")
+            try:
+                with open(bookmarks_file_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+
+                # Dump pretty-printed JSON
+                with open(bookmarks_json_dump_path, 'w', encoding='utf-8') as f_json:
+                    json.dump(data, f_json, indent=4)
+                logging.info(f"Full Chrome Bookmarks JSON dumped to {bookmarks_json_dump_path}")
+                print(f"  Full Chrome Bookmarks JSON dumped to {bookmarks_json_dump_path.name}")
+
+                # Extract to CSV
+                bookmarks_list = []
+                if 'roots' in data:
+                    for root_name, root_node in data['roots'].items():
+                        self._parse_chrome_bookmarks_recursive(root_node, [root_name], bookmarks_list)
+
+                if bookmarks_list:
+                    headers = ["name", "url", "folder_path"]
+                    with open(bookmarks_csv_path, 'w', newline='', encoding='utf-8') as csvfile:
+                        writer = csv.DictWriter(csvfile, fieldnames=headers)
+                        writer.writeheader()
+                        writer.writerows(bookmarks_list)
+                    logging.info(f"Chrome Bookmarks successfully parsed to {bookmarks_csv_path} ({len(bookmarks_list)} bookmarks).")
+                    print(f"  Successfully parsed Chrome Bookmarks to {bookmarks_csv_path.name} ({len(bookmarks_list)} bookmarks).")
+                else:
+                    logging.info("No individual bookmarks found or structure not as expected in Bookmarks JSON.")
+                    print("  Info: No individual bookmark entries extracted to CSV (structure might differ or empty).")
+
+            except json.JSONDecodeError as e:
+                logging.error(f"JSON decoding error while parsing Chrome Bookmarks {bookmarks_file_path}: {e}", exc_info=True)
+                print(f"  Error: Could not parse Chrome Bookmarks JSON: {e}")
+            except Exception as e:
+                logging.error(f"Unexpected error parsing Chrome Bookmarks {bookmarks_file_path}: {e}", exc_info=True)
+                print(f"  Error: Unexpected issue parsing Chrome Bookmarks: {e}")
+        else:
+            logging.warning(f"Chrome Bookmarks file not found at: {bookmarks_file_path}")
+            print(f"  Warning: Chrome Bookmarks file not found at expected location.")
+
+        # 3. Parse Cookies SQLite Database
+        # Common paths for Cookies DB relative to profile_path
+        cookies_db_candidates = [profile_path / "Cookies", profile_path / "Network" / "Cookies"]
+        cookies_db_path = None
+        for candidate in cookies_db_candidates:
+            if candidate.exists():
+                cookies_db_path = candidate
+                break
+
+        cookies_csv_path = parsed_app_output_dir / "chrome_cookies.csv"
+        if cookies_db_path:
+            logging.info(f"Parsing Chrome Cookies from: {cookies_db_path}")
+            try:
+                conn = sqlite3.connect(f"file:{cookies_db_path}?mode=ro", uri=True)
+                cursor = conn.cursor()
+                query = """
+                    SELECT
+                        datetime(creation_utc/1000000-11644473600, 'unixepoch', 'localtime') AS creation_time,
+                        datetime(last_access_utc/1000000-11644473600, 'unixepoch', 'localtime') AS last_access_time,
+                        datetime(last_update_utc/1000000-11644473600, 'unixepoch', 'localtime') AS last_update_time,
+                        host_key,
+                        name,
+                        value,
+                        path,
+                        datetime(expires_utc/1000000-11644473600, 'unixepoch', 'localtime') AS expires_time,
+                        is_secure,
+                        is_httponly,
+                        case samesite
+                            when 0 then 'Unspecified'
+                            when 1 then 'NoSameSite'
+                            when 2 then 'Lax'
+                            when 3 then 'Strict'
+                            else 'Unknown'
+                        end as samesite_policy,
+                        source_scheme,
+                        is_persistent
+                    FROM cookies
+                    ORDER BY last_access_time DESC;
+                """
+                cursor.execute(query)
+                rows = cursor.fetchall()
+                headers = ["creation_time", "last_access_time", "last_update_time", "host_key", "name", "value", "path",
+                           "expires_time", "is_secure", "is_httponly", "samesite_policy", "source_scheme", "is_persistent"]
+                with open(cookies_csv_path, 'w', newline='', encoding='utf-8') as csvfile:
+                    writer = csv.writer(csvfile)
+                    writer.writerow(headers)
+                    writer.writerows(rows)
+                logging.info(f"Chrome Cookies successfully parsed to {cookies_csv_path} ({len(rows)} cookies).")
+                print(f"  Successfully parsed Chrome Cookies to {cookies_csv_path.name} ({len(rows)} cookies).")
+            except sqlite3.Error as e:
+                logging.error(f"SQLite error while parsing Chrome Cookies {cookies_db_path}: {e}", exc_info=True)
+                print(f"  Error: Could not parse Chrome Cookies database: {e}")
+            except Exception as e:
+                logging.error(f"Unexpected error parsing Chrome Cookies {cookies_db_path}: {e}", exc_info=True)
+                print(f"  Error: Unexpected issue parsing Chrome Cookies: {e}")
+            finally:
+                if 'conn' in locals() and conn:
+                    conn.close()
+        else:
+            logging.warning(f"Chrome Cookies file not found in expected locations within profile: {profile_path}")
+            print(f"  Warning: Chrome Cookies file not found at expected locations.")
+
+        logging.info(f"Chrome data parsing attempt finished for {package_name}.")
+        print(f"[CHROME PARSER] Finished parsing attempt for {package_name}.")
+
+
+    def check_and_set_root_status(self):
+        if self.root_status_checked:
+            logging.info(f"Root status already checked. Current status: {'ROOT' if self.is_root else 'USER'}")
+            return self.is_root
+
+        logging.info("Attempting to check and set ADB root status...")
+        self.root_status_checked = True # Mark as checked now
+
+        # Check initial ID without attempting adb root first
+        initial_id_result = self._execute_adb_command([self.adb_path, "shell", "id"], timeout=10)
+        if initial_id_result and initial_id_result.stdout and "uid=0" in initial_id_result.stdout.lower():
+            logging.info(f"ADB is already running as root. UID: {initial_id_result.stdout.strip()}")
+            self.is_root = True
+            self.root_enabled_by_script = False # It was already root, not by this script instance
+            return True
+
+        logging.info("Current ADB session is not root. Attempting to restart ADB as root via 'adb root'...")
+        # Attempt 'adb root'
+        root_attempt_result = self._execute_adb_command([self.adb_path, "root"], timeout=20)
+
+        if root_attempt_result is None: # Command execution failed (e.g. timeout, adb error before returning)
+            logging.warning("`adb root` command execution failed or timed out. Assuming no root can be obtained.")
+            return False
+
+        # Log output of 'adb root'
+        # Some devices return "adbd is already running as root" even if 'id' says otherwise initially (less common).
+        # Others might say "restarting adbd as root" or give an error if not possible.
+        root_stdout = root_attempt_result.stdout.strip() if root_attempt_result.stdout else "No stdout"
+        root_stderr = root_attempt_result.stderr.strip() if root_attempt_result.stderr else "No stderr"
+        logging.info(f"`adb root` command output: STDOUT='{root_stdout}', STDERR='{root_stderr}'")
+
+        if "cannot run as root in production builds" in root_stdout or \
+           "cannot run as root in production builds" in root_stderr or \
+           "disabled" in root_stdout or "disabled" in root_stderr : # Common messages on locked devices
+            logging.warning("`adb root` command indicates root is disabled on this production build. Root access not available.")
+            self.is_root = False
+            return False
+
+        # If `adb root` command itself indicates it's already root, but initial `id` check didn't confirm.
+        # This can happen if `adb root` was run before and adbd is still root but shell context wasn't.
+        # Re-check `id` after 'adb root' attempt.
+        if "adbd is already running as root" in root_stdout or "adbd is already running as root" in root_stderr:
+             logging.info("`adb root` command reports adbd already root. Verifying shell UID again.")
+             # No need to set root_enabled_by_script to True here, as it was already root.
+        else:
+            # If `adb root` implies a change (e.g. "restarting adbd as root" or no specific error),
+            # then this script instance is attempting to enable it.
+            logging.info("`adb root` command processed. Waiting for device to reconnect...")
+            time.sleep(5) # Essential delay for adbd to restart
+            wait_result = self._execute_adb_command([self.adb_path, "wait-for-device"], timeout=30)
+            if wait_result is None or wait_result.returncode != 0:
+                logging.warning("Device did not reconnect after `adb root` attempt or `wait-for-device` failed. Assuming no root.")
+                self.is_root = False
+                return False
+            logging.info("Device reconnected after `adb root` attempt.")
+            # If adb root was attempted and device reconnected, mark that script potentially enabled it
+            # This will be confirmed by the 'id' check below.
+            # self.root_enabled_by_script = True # Tentatively true, confirmed by 'id'
+
+        # Final verification of root status
+        id_result = self._execute_adb_command([self.adb_path, "shell", "id"], timeout=10)
+        if id_result and id_result.stdout and "uid=0" in id_result.stdout.lower():
+            logging.info(f"Successfully running ADB as root. UID: {id_result.stdout.strip()}")
+            self.is_root = True
+            # If it wasn't root before the 'adb root' command, then this script enabled it.
+            # We need to compare with the initial state before setting root_enabled_by_script.
+            # For simplicity now: if `adb root` was called and now it is root, assume script action.
+            # A more precise way would be to check if `is_root` was false before `adb root` call.
+            if not ("adbd is already running as root" in root_stdout or "adbd is already running as root" in root_stderr):
+                 self.root_enabled_by_script = True # Script initiated this root session
+            return True
+        else:
+            log_msg = f"Failed to confirm root after `adb root` attempt. UID: {id_result.stdout.strip() if id_result and id_result.stdout else 'Not available'}."
+            if id_result and id_result.stderr:
+                log_msg += f" Stderr: {id_result.stderr.strip()}"
+            logging.warning(log_msg)
+            self.is_root = False
+            self.root_enabled_by_script = False # Reset if root was not achieved
+            return False
+
+    def revert_adb_to_user(self):
+        # Only unroot if script specifically enabled it and it's currently root.
+        # Or, more simply for now, if --attempt-root was used and device is root.
+        if self.is_root and self.root_enabled_by_script: # More precise condition
+            logging.info("Attempting to revert ADB to user mode (adb unroot)...")
+            unroot_result = self._execute_adb_command([self.adb_path, "unroot"], timeout=20)
+
+            if unroot_result is None:
+                logging.warning("`adb unroot` command execution failed or timed out.")
+                return
+
+            unroot_stdout = unroot_result.stdout.strip() if unroot_result.stdout else "No stdout"
+            unroot_stderr = unroot_result.stderr.strip() if unroot_result.stderr else "No stderr"
+            logging.info(f"`adb unroot` command output: STDOUT='{unroot_stdout}', STDERR='{unroot_stderr}'")
+
+            logging.info("Waiting for device to reconnect after `adb unroot`...")
+            time.sleep(5) # Essential delay
+            wait_result = self._execute_adb_command([self.adb_path, "wait-for-device"], timeout=30)
+
+            if wait_result is None or wait_result.returncode != 0:
+                logging.warning("Device did not reconnect after `adb unroot` or `wait-for-device` failed.")
+            else:
+                logging.info("Device reconnected after `adb unroot`.")
+
+            # Verify not root anymore
+            id_result = self._execute_adb_command([self.adb_path, "shell", "id"], timeout=10)
+            if id_result and id_result.stdout and "uid=0" not in id_result.stdout.lower():
+                logging.info(f"Successfully reverted ADB to user mode. UID: {id_result.stdout.strip()}")
+            else:
+                logging.warning(f"Failed to confirm ADB reverted to user mode. UID: {id_result.stdout.strip() if id_result and id_result.stdout else 'Not available'}")
+
+            self.is_root = False # Assume unroot worked or state is no longer root
+            self.root_enabled_by_script = False
+        elif self.is_root:
+            logging.info("ADB is root, but was not enabled by this script instance. Skipping `adb unroot`.")
+        else:
+            logging.info("ADB not running as root or root status not checked. No need to unroot.")
+
+
     # Placeholder for advanced_data_capture if it's intended to be a module, currently it's always run if device connected.
     # For CLI, it should also be an option. For now, keeping its original behavior within the main sequence.
     def advanced_data_capture(self, duration=30):
@@ -1370,9 +1829,28 @@ def main_cli(): # Renamed from main to avoid conflict if any other main exists, 
         metavar='SECONDS',
         help="Duration in seconds for screen recording if --advanced-capture is selected (default: 15)."
     )
+    module_group.add_argument(
+        '--app-data',
+        nargs='*',
+        metavar='PACKAGE_NAME',
+        help="Extract data for specific app(s) using root pull (if available) or ADB backup. "
+             "Provide space-separated package names (e.g., com.example.app1 com.example.app2). "
+             "If provided with no arguments, a default list of apps will be attempted."
+    )
+    module_group.add_argument(
+        '--parse-chrome',
+        action='store_true',
+        help="Parse extracted Google Chrome data (History, Bookmarks, Cookies). "
+             "Requires Chrome data to have been extracted first (e.g., via --app-data com.android.chrome or --all)."
+    )
 
     # --- Configuration Options ---
     config_group = parser.add_argument_group('Configuration Options')
+    config_group.add_argument(
+        '--attempt-root',
+        action='store_true',
+        help="Attempt to restart ADB with root privileges for operations that might require it."
+    )
     config_group.add_argument(
         '--output-dir', '-o',
         type=str,
@@ -1403,6 +1881,18 @@ def main_cli(): # Renamed from main to avoid conflict if any other main exists, 
     )
     # Logging is now configured within AegisExtractor's __init__
 
+    # Attempt to gain root if requested, before checking connection or running modules
+    if args.attempt_root:
+        print("\n[PHASE] Attempting to check/gain root access...")
+        if extractor.check_and_set_root_status():
+            print(f"ADB is running with root privileges (UID=0). Current root status: {extractor.is_root}")
+        else:
+            print(f"ADB is running with user privileges. Current root status: {extractor.is_root}")
+            if not extractor.is_root:
+                 print("Warning: Root access not obtained. Some extractions might be limited.")
+        logging.info(f"Root status after check/attempt: {extractor.is_root}. Script enabled root: {extractor.root_enabled_by_script}")
+
+
     # Determine which modules to run
     run_all = args.all
     run_device_info = args.device_info or run_all
@@ -1412,14 +1902,17 @@ def main_cli(): # Renamed from main to avoid conflict if any other main exists, 
     run_sms = args.sms or run_all
     run_whatsapp = args.whatsapp or run_all
     run_advanced_capture = args.advanced_capture or run_all
+    run_app_data = args.app_data is not None or run_all # True if --app-data flag is present or --all
+    run_parse_chrome = args.parse_chrome or run_all # Parse Chrome if explicitly asked or --all
 
     any_module_selected = any([
         run_device_info, run_pull_files, run_contacts,
-        run_call_logs, run_sms, run_whatsapp, run_advanced_capture
+        run_call_logs, run_sms, run_whatsapp, run_advanced_capture,
+        run_app_data, run_parse_chrome # Considered a module selection
     ])
 
     if not any_module_selected:
-        print("No extraction module selected. Please specify at least one module to run (e.g., --device-info, --all). Use -h for help.")
+        print("No extraction module selected. Please specify at least one module to run (e.g., --device-info, --all, --app-data, --parse-chrome). Use -h for help.")
         parser.print_help()
         # Logging might not be fully set if __init__ had issues, but attempt shutdown.
         if logging.getLogger().hasHandlers(): logging.shutdown()
@@ -1466,6 +1959,34 @@ def main_cli(): # Renamed from main to avoid conflict if any other main exists, 
             print("\n[PHASE] Advanced Data Capture (Screen Recording & Logs)...")
             extractor.advanced_data_capture(duration=args.scrcpy_duration)
 
+        if run_app_data:
+            print("\n[PHASE] Targeted Application Data Extraction...")
+            # If --all was used, args.app_data would be None.
+            # If --app-data was used without package names, args.app_data is [].
+            # If --app-data com.example.app, args.app_data is ['com.example.app'].
+            # The method extract_targeted_app_data handles None or [] by using defaults.
+            app_data_packages_to_extract = args.app_data # This could be None, an empty list, or a list of packages
+            if run_all and args.app_data is None:
+                # If --all is on, and --app-data was not used, extract_targeted_app_data will use its defaults (which should include chrome for run_parse_chrome with --all to work)
+                app_data_packages_to_extract = None
+            elif args.app_data is not None and not args.app_data: # --app-data specified with no packages
+                app_data_packages_to_extract = None # Triggers default list in the method
+
+            extractor.extract_targeted_app_data(package_names_list=app_data_packages_to_extract)
+
+        # Chrome parsing should run after app data extraction if com.android.chrome was targeted
+        # or if --all was used (implying Chrome data might have been extracted by default).
+        if run_parse_chrome:
+            # Check if Chrome data was likely extracted to avoid parsing non-existent files
+            chrome_package_name = "com.android.chrome"
+            was_chrome_extracted_explicitly = app_data_packages_to_extract and chrome_package_name in app_data_packages_to_extract
+            is_chrome_in_defaults_for_all = run_all and (app_data_packages_to_extract is None) # Assumes Chrome is in defaults if --all and no specific --app-data
+
+            # A simpler check: just call parse_chrome_data. The method itself checks if data exists.
+            # This avoids complex logic here about whether Chrome data *should* have been extracted.
+            print("\n[PHASE] Parsing Google Chrome Data...")
+            extractor.parse_chrome_data(package_name=chrome_package_name)
+
     else:
         logging.warning("No device connected or device not authorized. Operations will be skipped.")
         print("\n[ERROR] No device connected or device not authorized. Please check USB connection, enable USB debugging, and authorize the connection on your device. Then, re-run the script with desired options.")
@@ -1473,6 +1994,10 @@ def main_cli(): # Renamed from main to avoid conflict if any other main exists, 
     logging.info("=== Aegis Extraction Sequence Finished ===")
     print(f"\n[INFO] Aegis Android Extractor run completed at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}.")
     print(f"[INFO] All outputs and the main log file are in: {extractor.output_dir}")
+
+    # Revert to user mode if root was attempted and script enabled it
+    if args.attempt_root: # Only if --attempt-root was used
+        extractor.revert_adb_to_user()
 
     # Ensure all log handlers are closed properly
     if logging.getLogger().hasHandlers():
