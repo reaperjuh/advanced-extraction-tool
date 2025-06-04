@@ -287,3 +287,70 @@ The script generates a single HTML file.
     ```bash
     python report_generator.py ./extraction_output/another_device/ --output Investigation_Report.html --title "Report for Another Device"
     ```
+
+## PCAP File Analyzer (`pcap_analyzer.py`)
+
+**Overview:**
+`pcap_analyzer.py` analyzes PCAP or PCAPng network capture files to provide various summaries and insights into the captured traffic. It uses the `dpkt` library for packet parsing and can identify Ethernet, IP (v4/v6), TCP, UDP, ICMP, ARP packets, and perform basic analysis for DNS queries, HTTP requests (stateless), and TLS Server Name Indication (SNI).
+
+**Prerequisites:**
+*   **dpkt Library:** This script requires the `dpkt` library to be installed. You can install it using pip:
+    ```bash
+    pip install dpkt
+    ```
+
+**Usage:**
+The basic command to run the script is:
+```bash
+python pcap_analyzer.py <pcap_file> [options]
+```
+*(Note: On Windows, you might need `python.exe` or `py` instead of `python`)*
+
+**Command-Line Arguments:**
+
+*   `pcap_file`: (Positional, Required) The path to the PCAP or PCAPng file to be analyzed.
+*   `--output-dir OUTPUT_DIR`: (Optional) Directory where generated CSV summary files will be saved. If not specified, CSV files are not generated.
+*   `--filter BPF_FILTER`: (Optional) A BPF (Berkeley Packet Filter) filter string to apply to the packets. (Note: This is currently a placeholder and not implemented in the parsing logic; filtering would occur post-parsing if implemented here, or ideally during capture).
+*   `--ip-top-n N`: (Optional) Specifies the number of top source and destination IP addresses to display in summaries. Defaults to 10.
+*   `--dns-top-n N`: (Optional) Specifies the number of top DNS queried names to display. Defaults to 10.
+*   `--http-top-n N`: (Optional) Specifies the number of top HTTP hosts (from Host headers) to display. Defaults to 10.
+*   `--conv-top-n N`: (Optional) Specifies the number of top network conversations (by packet count) to display. Defaults to 10.
+*   `--tls-top-n N`: (Optional) Specifies the number of top TLS SNI (Server Name Indication) hostnames to display. Defaults to 10.
+*   `-v, --verbose`: (Optional) Enables verbose output, which includes printing details for each processed packet (or a limited number if not verbose) and more detailed processing messages.
+
+**Console Output:**
+The script prints several summaries to the console:
+*   **Overall Summary Statistics:** Total packets, total bytes, capture duration, average packet size, average data rate, and linktype distribution.
+*   **Protocol Distribution:** Counts for Layer 2 Ethernet types, IP versions (IPv4, IPv6, ARP), Transport layer protocols (TCP, UDP, ICMP, etc.), and Application layer protocols (heuristically identified by common ports like DNS/53, HTTP/80, TLS/443).
+*   **Top IP Addresses:** Lists of the most frequent source and destination IP addresses.
+*   **Top Conversations:** Summaries of the most active network conversations (by packet count), showing source/destination IPs and ports, protocol, packet/byte counts per direction, duration, and a summary of TCP flags.
+*   **Top DNS Queries:** List of the most frequently queried DNS names.
+*   **Top HTTP Hosts:** List of the most frequently accessed HTTP hosts (from Host headers).
+*   **Top TLS SNI Hostnames:** List of the most frequent Server Name Indications from TLS Client Hello messages.
+
+**CSV Outputs (if `--output-dir` is specified):**
+If an output directory is provided, the script generates the following CSV files containing more detailed data:
+*   `summary_stats.csv`: Key-value pairs of the overall statistics.
+*   `protocol_distribution.csv`: Detailed counts for each protocol category.
+*   `ip_source_summary.csv`: All source IP addresses and their packet counts.
+*   `ip_destination_summary.csv`: All destination IP addresses and their packet counts.
+*   `conversations.csv`: Detailed information for all identified network conversations.
+*   `dns_queries.csv`: A log of all DNS queries found (timestamp, query ID, name, type).
+*   `dns_top_queried_names.csv`: The top N queried DNS names and their counts.
+*   `http_requests.csv`: A log of (a sample of) detected HTTP requests.
+*   `http_top_hosts.csv`: The top N HTTP hosts and their access counts.
+*   `tls_client_hellos_sni.csv`: A log of (a sample of) TLS Client Hello messages that included an SNI.
+*   `tls_top_sni.csv`: The top N SNI hostnames and their occurrence counts.
+
+**Examples:**
+
+1.  **Analyze `network_traffic.pcap` and print summaries to the console:**
+    ```bash
+    python pcap_analyzer.py network_traffic.pcap
+    ```
+
+2.  **Analyze `capture.pcapng`, save all generated CSV files to `./analysis_output`, and show verbose console output:**
+    ```bash
+    python pcap_analyzer.py capture.pcapng --output-dir ./analysis_output --verbose
+    ```
+    *(This will create files like `./analysis_output/summary_stats.csv`, `./analysis_output/conversations.csv`, etc.)*
