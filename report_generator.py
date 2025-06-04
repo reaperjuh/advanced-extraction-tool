@@ -6,14 +6,14 @@ import sys
 import sqlite3
 import re
 
+# --- Global Flags ---
+verbose_flag_for_parsers = False
+
 # --- Helper Functions ---
 def html_escape(text, limit=None):
-    """Escapes text for HTML output, optionally truncating."""
-    if text is None:
-        return ""
+    if text is None: return ""
     escaped_text = html.escape(str(text))
-    if limit is not None and len(escaped_text) > limit:
-        return escaped_text[:limit] + "..."
+    if limit is not None and len(escaped_text) > limit: return escaped_text[:limit] + "..."
     return escaped_text
 
 def format_timestamp_for_report(dt_obj, default_val="N/A"):
@@ -63,7 +63,7 @@ HTML_HEADER_TEMPLATE = """
         .status-not-found {{ color: #dc3545; }}
         .status-found {{ color: #28a745; }}
         .filename {{ font-family: 'Consolas', 'Courier New', monospace; background-color: #e9ecef; padding: 3px 6px; border-radius: 3px; font-size: 0.9em; }}
-        .details-table th {{ width: 20%; background-color: #f1f3f5; }} /* More specific for key-value tables */
+        .details-table th {{ width: 20%; background-color: #f1f3f5; }}
         .details-table td {{ background-color: #fff; }}
         .code {{ font-family: 'Consolas', 'Courier New', monospace; word-break: break-all; }}
         .footer {{ text-align: center; margin-top: 30px; padding-top: 15px; border-top: 1px solid #dee2e6; font-size: 0.9em; color: #6c757d; }}
@@ -90,13 +90,16 @@ HTML_FOOTER = """
 # --- HTML Generation Helper Functions ---
 def generate_html_table(headers, rows_data, table_class=""):
     html_str = f"<table class='{table_class}'>\n<thead><tr>"
-    for header in headers:
-        html_str += f"<th>{html_escape(header)}</th>"
+    for header in headers: html_str += f"<th>{html_escape(header)}</th>"
     html_str += "</tr></thead>\n<tbody>\n"
     for row in rows_data:
         html_str += "<tr>"
-        for cell in row:
-            html_str += f"<td>{html_escape(cell)}</td>"
+        for i, cell in enumerate(row):
+            # Assume cells for URLs (e.g., in browsing history) might already be HTML for links
+            if isinstance(cell, str) and ("<a href" in cell or "<span class" in cell):
+                html_str += f"<td>{cell}</td>"
+            else:
+                html_str += f"<td>{html_escape(cell)}</td>"
         html_str += "</tr>\n"
     html_str += "</tbody>\n</table>"
     return html_str
@@ -109,14 +112,13 @@ def generate_html_section(title, content_html, section_id):
 def generate_device_info_html(device_data):
     content_html = ""
     if device_data.get('properties'):
-        rows = [[html_escape(k), html_escape(v)] for k, v in device_data['properties'].items()]
+        rows = [[k,v] for k, v in device_data['properties'].items()]
         content_html += "<h3>Device Properties</h3>" + generate_html_table(["Property", "Value"], rows, "details-table")
     elif 'properties_status' in device_data:
         content_html += f"<p>Device Properties: <span class='error'>{html_escape(device_data['properties_status'])}</span></p>"
-
     count = device_data.get('installed_packages_count', 'N/A')
     status_msg = ""
-    if 'packages_status' in device_data and count == 0: # Only show status if count is 0 due to error/not found
+    if 'packages_status' in device_data and (isinstance(count, int) and count == 0):
         status_msg = f" (<span class='error'>{html_escape(device_data['packages_status'])}</span>)"
     content_html += f"<p><strong>Installed Packages Count:</strong> {html_escape(count)}{status_msg}</p>"
     return content_html
@@ -126,100 +128,47 @@ def generate_key_files_status_html(key_files_data):
     rows = []
     for item in key_files_data:
         status_class = "status-not-found" if "Not found" in item['status'] else "status-found" if "Found" in item['status'] else ""
-        rows.append([
-            html_escape(item['name']),
-            f"<span class='filename'>{html_escape(item['path'])}</span>", # Path already escaped by html_escape in generate_html_table
-            f"<span class='{status_class}'>{html_escape(item['status'])}</span>"
-        ])
-    # For key files, we want to render HTML within cells, so we build manually
-    html_str = "<table class='details-table'>\n<thead><tr>"
-    for header in headers: html_str += f"<th>{html_escape(header)}</th>"
-    html_str += "</tr></thead>\n<tbody>\n"
-    for row_cells in rows:
-        html_str += "<tr>"
-        for cell_html in row_cells: html_str += f"<td>{cell_html}</td>" # cell_html is already escaped or contains safe HTML
-        html_str += "</tr>\n"
-    html_str += "</tbody>\n</table>"
-    return html_str
-
+        rows.append([ item['name'], f"<span class='filename'>{html_escape(item['path'])}</span>",
+                      f"<span class='{status_class}'>{html_escape(item['status'])}</span>" ])
+    return generate_html_table(headers, rows, "details-table")
 
 def generate_communications_summary_html(comm_summary, max_sample_items):
     content_html = ""
-    # SMS
-    sms_info = comm_summary.get('sms', {})
-    content_html += f"<h3>SMS Summary</h3><p><strong>Status:</strong> {html_escape(sms_info.get('status', 'Not found'))}<br>"
-    if 'counts' in sms_info:
-        content_html += f"<strong>Counts:</strong> Received: {sms_info['counts'].get('received',0)}, Sent: {sms_info['counts'].get('sent',0)}, Other: {sms_info['counts'].get('other',0)}</p>"
-    if sms_info.get('samples'):
-        headers = ["Timestamp", "Type", "Address", "Body (Snippet)"]
-        rows = [[s['date'], s['type'], s['address'], s['body']] for s in sms_info['samples']]
-        content_html += generate_html_table(headers, rows)
-
-    # MMS
-    mms_info = comm_summary.get('mms', {})
-    content_html += f"<h3>MMS Summary</h3><p><strong>Status:</strong> {html_escape(mms_info.get('status', 'Not found'))}<br>"
-    if 'counts' in mms_info:
-        content_html += f"<strong>Counts:</strong> Received: {mms_info['counts'].get('received',0)}, Sent: {mms_info['counts'].get('sent',0)}</p>"
-    if mms_info.get('samples'):
-        headers = ["Timestamp", "Type", "Subject", "ID"]
-        rows = [[s['date'], s['type'], s['subject'], s['id']] for s in mms_info['samples']]
-        content_html += generate_html_table(headers, rows)
-
-    # Calls
-    calls_info = comm_summary.get('calls', {})
-    content_html += f"<h3>Call Log Summary</h3><p><strong>Status:</strong> {html_escape(calls_info.get('status', 'Not found'))}<br>"
-    if 'counts' in calls_info:
-        counts_str = ", ".join([f"{k}: {v}" for k,v in calls_info['counts'].items()])
-        content_html += f"<strong>Counts:</strong> {html_escape(counts_str)}</p>"
-    if calls_info.get('samples'):
-        headers = ["Timestamp", "Type", "Name", "Number", "Duration (s)"]
-        rows = [[s['date'], s['type'], s['name'], s['number'], s['duration']] for s in calls_info['samples']]
-        content_html += generate_html_table(headers, rows)
+    sms_info = comm_summary.get('sms', {}); content_html += f"<h3>SMS Summary</h3><p><strong>Status:</strong> {html_escape(sms_info.get('status', 'Not found'))}<br>"
+    if 'counts' in sms_info: content_html += f"<strong>Counts:</strong> Received: {sms_info['counts'].get('received',0)}, Sent: {sms_info['counts'].get('sent',0)}, Other: {sms_info['counts'].get('other',0)}</p>"
+    if sms_info.get('samples'): headers=["Timestamp","Type","Address","Body (Snippet)"]; rows=[[s['date'],s['type'],s['address'],s['body']] for s in sms_info['samples']]; content_html+=generate_html_table(headers,rows)
+    mms_info = comm_summary.get('mms', {}); content_html += f"<h3>MMS Summary</h3><p><strong>Status:</strong> {html_escape(mms_info.get('status', 'Not found'))}<br>"
+    if 'counts' in mms_info: content_html += f"<strong>Counts:</strong> Received: {mms_info['counts'].get('received',0)}, Sent: {mms_info['counts'].get('sent',0)}</p>"
+    if mms_info.get('samples'): headers=["Timestamp","Type","Subject","ID"]; rows=[[s['date'],s['type'],s['subject'],s['id']] for s in mms_info['samples']]; content_html+=generate_html_table(headers,rows)
+    calls_info = comm_summary.get('calls', {}); content_html += f"<h3>Call Log Summary</h3><p><strong>Status:</strong> {html_escape(calls_info.get('status', 'Not found'))}<br>"
+    if 'counts' in calls_info: counts_str=", ".join([f"{k}: {v}" for k,v in calls_info['counts'].items()]); content_html+=f"<strong>Counts:</strong> {html_escape(counts_str)}</p>"
+    if calls_info.get('samples'): headers=["Timestamp","Type","Name","Number","Duration (s)"]; rows=[[s['date'],s['type'],s['name'],s['number'],s['duration']] for s in calls_info['samples']]; content_html+=generate_html_table(headers,rows)
     return content_html
 
 def generate_browsing_summary_html(browsing_summary, max_sample_items):
-    content_html = ""
-    chrome_info = browsing_summary.get('chrome_history', {})
+    content_html = ""; chrome_info = browsing_summary.get('chrome_history', {})
     content_html += f"<h3>Chrome History Summary</h3><p><strong>Status:</strong> {html_escape(chrome_info.get('status', 'Not found'))}<br>"
-    if chrome_info.get('status', '').startswith("Processed"):
-        content_html += f"<strong>Total URLs:</strong> {chrome_info.get('total_urls',0)}, <strong>Total Visits:</strong> {chrome_info.get('total_visits',0)}</p>"
-
+    if chrome_info.get('status', '').startswith("Processed"): content_html += f"<strong>Total URLs:</strong> {chrome_info.get('total_urls',0)}, <strong>Total Visits:</strong> {chrome_info.get('total_visits',0)}</p>"
     if chrome_info.get('recent_sites'):
-        content_html += "<h4>Recently Visited Sites</h4>"
-        headers = ["Last Visit Time", "Title", "URL"]
-        rows = [[s['last_visit_time'], s['title'], f"<a href='{s['url']}' target='_blank'>{s['url']}</a>"] for s in chrome_info['recent_sites']]
-        # Manual table for link
-        html_str = "<table>\n<thead><tr>"
-        for header in headers: html_str += f"<th>{html_escape(header)}</th>"
-        html_str += "</tr></thead>\n<tbody>\n"
-        for row_cells in rows:
-            html_str += "<tr>"
-            html_str += f"<td>{html_escape(row_cells[0])}</td>"
-            html_str += f"<td>{html_escape(row_cells[1])}</td>"
-            html_str += f"<td>{row_cells[2]}</td>" # URL is already escaped, link is safe
-            html_str += "</tr>\n"
-        html_str += "</tbody>\n</table>"
-        content_html += html_str
-
+        content_html += "<h4>Recently Visited Sites</h4>"; headers = ["Last Visit Time", "Title", "URL"]
+        rows = [[s['last_visit_time'], s['title'], f"<a href='{html_escape(s['url'])}' target='_blank'>{html_escape(s['url'])}</a>"] for s in chrome_info['recent_sites']]
+        content_html += generate_html_table(headers, rows)
     if chrome_info.get('top_sites'):
-        content_html += "<h4>Top Visited Sites (by total visits to URL)</h4>"
-        headers = ["Visit Count", "Title", "URL"]
-        rows = [[s['visit_count'], s['title'], f"<a href='{s['url']}' target='_blank'>{s['url']}</a>"] for s in chrome_info['top_sites']]
-        # Manual table for link
-        html_str = "<table>\n<thead><tr>"
-        for header in headers: html_str += f"<th>{html_escape(header)}</th>"
-        html_str += "</tr></thead>\n<tbody>\n"
-        for row_cells in rows:
-            html_str += "<tr>"
-            html_str += f"<td>{html_escape(row_cells[0])}</td>"
-            html_str += f"<td>{html_escape(row_cells[1])}</td>"
-            html_str += f"<td>{row_cells[2]}</td>" # URL is already escaped, link is safe
-            html_str += "</tr>\n"
-        html_str += "</tbody>\n</table>"
-        content_html += html_str
+        content_html += "<h4>Top Visited Sites (by total visits to URL)</h4>"; headers = ["Visit Count", "Title", "URL"]
+        rows = [[s['visit_count'], s['title'], f"<a href='{html_escape(s['url'])}' target='_blank'>{html_escape(s['url'])}</a>"] for s in chrome_info['top_sites']]
+        content_html += generate_html_table(headers, rows)
     return content_html
 
-# --- Argument Parser, Data Gathering (from previous step, ensure they are complete) ---
+# --- Argument Parser & Data Gathering Functions ---
+KEY_ARTIFACT_PATHS = {
+    "DCIM Storage": os.path.join("Media", "SD Card", "DCIM"),
+    "Downloads Storage": os.path.join("Media", "SD Card", "Download"),
+    "WhatsApp Databases": os.path.join("App Data", "SD Card", "WhatsApp", "Databases"),
+    "Contacts DB": os.path.join("User Data", "contacts_db"),
+    "SMS_MMS DB": os.path.join("User Data", "mmssms.db"),
+    "CallLog DB": os.path.join("User Data", "calllog.db"),
+    "Chrome History DB": os.path.join("Browser Data", "Chrome", "History")
+}
 def setup_parser():
     parser = argparse.ArgumentParser(description="Generate an HTML report from extracted Android artifacts.")
     parser.add_argument("input_dir", help="Path to the base directory for a single device.")
@@ -230,8 +179,7 @@ def setup_parser():
 
 def gather_device_info(input_dir):
     device_info = {'properties': {}, 'installed_packages_count': 0}
-    important_props = ['ro.product.model', 'ro.product.manufacturer', 'ro.build.version.release',
-                       'ro.build.id', 'ro.serialno', 'ro.build.version.sdk']
+    important_props = ['ro.product.model', 'ro.product.manufacturer', 'ro.build.version.release', 'ro.build.id', 'ro.serialno', 'ro.build.version.sdk']
     prop_pattern = re.compile(r"^\s*\[(.*?)]\s*:\s*\[(.*?)]\s*$")
     properties_file = os.path.join(input_dir, "Device Information", "device_properties.txt")
     if os.path.exists(properties_file):
@@ -241,38 +189,30 @@ def gather_device_info(input_dir):
                     match = prop_pattern.match(line.strip())
                     if match:
                         key, value = match.groups()
-                        if key in important_props: device_info['properties'][key] = value
-            if not device_info['properties'] and os.path.getsize(properties_file) > 0 :
-                 device_info['properties_status'] = "File found but no matching important properties extracted or format error."
-            elif not device_info['properties'] and os.path.getsize(properties_file) == 0:
-                 device_info['properties_status'] = "File found but empty."
+                        if key in important_props: # Only store important ones
+                            device_info['properties'][key] = value
+            if not device_info['properties'] and os.path.getsize(properties_file) > 0 : device_info['properties_status'] = "File found but no matching important properties extracted or format error."
+            elif not device_info['properties'] and os.path.getsize(properties_file) == 0: device_info['properties_status'] = "File found but empty."
         except IOError as e: device_info['properties_status'] = f"Error reading file: {e}"
     else: device_info['properties_status'] = "File not found"
+
     packages_file = os.path.join(input_dir, "Device Information", "installed_packages.txt")
     if os.path.exists(packages_file):
         try:
             with open(packages_file, 'r', encoding='utf-8', errors='replace') as f:
                 lines = f.readlines()
-                package_lines = [line for line in lines if line.strip() and not line.lower().startswith("package:")]
+                package_lines = [line for line in lines if line.strip() and "package:" in line.lower()]
                 device_info['installed_packages_count'] = len(package_lines)
+                if not package_lines and lines: device_info['packages_status'] = "File found, but no package lines identified."
+                elif not lines: device_info['packages_status'] = "File found but empty."
         except IOError as e: device_info['packages_status'] = f"Error reading file: {e}"
     else: device_info['packages_status'] = "File not found"
     return device_info
 
 def gather_key_files_status(input_dir):
     key_files_status = []
-    key_artifact_paths = {
-        "DCIM Storage": os.path.join("Media", "SD Card", "DCIM"),
-        "Downloads Storage": os.path.join("Media", "SD Card", "Download"),
-        "WhatsApp Databases": os.path.join("App Data", "SD Card", "WhatsApp", "Databases"),
-        "Contacts DB": os.path.join("User Data", "contacts_db"),
-        "SMS_MMS DB": os.path.join("User Data", "mmssms.db"),
-        "CallLog DB": os.path.join("User Data", "calllog.db"),
-        "Chrome History DB": os.path.join("Browser Data", "Chrome", "History")
-    }
-    for display_name, rel_path in key_artifact_paths.items():
-        full_path = os.path.join(input_dir, rel_path)
-        status_entry = {'name': display_name, 'path': rel_path, 'status': "Not found"}
+    for display_name, rel_path in KEY_ARTIFACT_PATHS.items():
+        full_path = os.path.join(input_dir, rel_path); status_entry = {'name': display_name, 'path': rel_path, 'status': "Not found"}
         if os.path.exists(full_path):
             try:
                 if os.path.isfile(full_path): status_entry['status'] = f"Found (File, {os.path.getsize(full_path)} bytes)"
@@ -282,43 +222,38 @@ def gather_key_files_status(input_dir):
     return key_files_status
 
 def gather_communications_summary(input_dir, max_sample_items=5):
-    summary = {
-        'sms': {'status': 'Not found', 'counts': {}, 'samples': []},
-        'mms': {'status': 'Not found', 'counts': {}, 'samples': []},
-        'calls': {'status': 'Not found', 'counts': {}, 'samples': []}
-    }
+    summary = {'sms': {'status': 'Not found', 'counts': {}, 'samples': []}, 'mms': {'status': 'Not found', 'counts': {}, 'samples': []}, 'calls': {'status': 'Not found', 'counts': {}, 'samples': []}}
     sms_db_path = os.path.join(input_dir, "User Data", "mmssms.db")
     if os.path.exists(sms_db_path):
         try:
-            conn = sqlite3.connect(f'file:{sms_db_path}?mode=ro', uri=True)
-            conn.row_factory = sqlite3.Row; cursor = conn.cursor()
-            cursor.execute("SELECT type, COUNT(*) as count FROM sms GROUP BY type")
-            stc = {r['type']: r['count'] for r in cursor.fetchall()}
-            summary['sms']['counts'] = {'received': stc.get(1,0), 'sent': stc.get(2,0), 'other': sum(v for k,v in stc.items() if k not in [1,2])}
+            conn = sqlite3.connect(f'file:{sms_db_path}?mode=ro', uri=True); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
+            cursor.execute("SELECT type, COUNT(*) as count FROM sms GROUP BY type"); stc = {r['type']: r['count'] for r in cursor.fetchall()}
+            summary['sms']['counts'] = {'received':stc.get(1,0),'sent':stc.get(2,0),'other':sum(v for k,v in stc.items() if k not in[1,2])}
             summary['sms']['status'] = f"Processed (R: {stc.get(1,0)}, S: {stc.get(2,0)})"
             cursor.execute("SELECT address, date, type, body FROM sms ORDER BY date DESC LIMIT ?", (max_sample_items,))
-            for r in cursor.fetchall(): summary['sms']['samples'].append({'address': html_escape(r['address']), 'date': format_timestamp_for_report(epoch_milliseconds_to_datetime(r['date'])), 'type': {1:"Recv",2:"Sent"}.get(r['type'],f"T{r['type']}"), 'body': html_escape(r['body'],100)})
-            cursor.execute("SELECT msg_box, COUNT(*) as count FROM mms GROUP BY msg_box")
-            mtc = {r['msg_box']: r['count'] for r in cursor.fetchall()}
-            summary['mms']['counts'] = {'received': mtc.get(1,0), 'sent': mtc.get(2,0)}
-            summary['mms']['status'] = f"Processed (R: {mtc.get(1,0)}, S: {mtc.get(2,0)})"
+            for r in cursor.fetchall(): summary['sms']['samples'].append({'address':r['address'],'date':format_timestamp_for_report(epoch_milliseconds_to_datetime(r['date'])),'type':{1:"Received",2:"Sent"}.get(r['type'],f"T{r['type']}"),'body':html_escape(r['body'],100)})
+            cursor.execute("SELECT msg_box, COUNT(*) as count FROM mms GROUP BY msg_box"); mtc = {r['msg_box']: r['count'] for r in cursor.fetchall()}
+            summary['mms']['counts'] = {'received':mtc.get(1,0),'sent':mtc.get(2,0)}; summary['mms']['status'] = f"Processed (R: {mtc.get(1,0)}, S: {mtc.get(2,0)})"
             cursor.execute("SELECT _id, date, msg_box, sub FROM mms ORDER BY date DESC LIMIT ?", (max_sample_items,))
-            for r in cursor.fetchall(): summary['mms']['samples'].append({'id':r['_id'], 'date':format_timestamp_for_report(epoch_seconds_to_datetime(r['date'])), 'type':{1:"Recv",2:"Sent",3:"Draft",4:"Outbox"}.get(r['msg_box'],f"B{r['msg_box']}"), 'subject':html_escape(r['sub'],100)})
+            for r in cursor.fetchall(): summary['mms']['samples'].append({'id':r['_id'],'date':format_timestamp_for_report(epoch_seconds_to_datetime(r['date'])),'type':{1:"Recv",2:"Sent",3:"Draft",4:"Outbox"}.get(r['msg_box'],f"B{r['msg_box']}"),'subject':html_escape(r['sub'],100)})
             conn.close()
-        except sqlite3.Error as e: summary['sms']['status'] = summary['mms']['status'] = f"Error: {html_escape(e)}"
+        except sqlite3.Error as e:
+            err_msg = f"Error: {html_escape(e)}"; summary['sms']['status']=err_msg; summary['mms']['status']=err_msg
+            if verbose_flag_for_parsers: print(f"Error processing SMS/MMS DB {sms_db_path}: {e}", file=sys.stderr)
     calllog_db_path = os.path.join(input_dir, "User Data", "calllog.db")
     if os.path.exists(calllog_db_path):
         try:
-            conn = sqlite3.connect(f'file:{calllog_db_path}?mode=ro', uri=True)
-            conn.row_factory = sqlite3.Row; cursor = conn.cursor()
-            ctc={}; cursor.execute("SELECT type, COUNT(*) as count FROM calls GROUP BY type")
+            conn=sqlite3.connect(f'file:{calllog_db_path}?mode=ro',uri=True);conn.row_factory=sqlite3.Row;cursor=conn.cursor()
+            ctc={};cursor.execute("SELECT type, COUNT(*) as count FROM calls GROUP BY type")
             ctm={1:"In",2:"Out",3:"Miss",4:"Voice",5:"Rej",6:"Block",7:"AnsExt"}
             for r in cursor.fetchall(): ctc[ctm.get(r['type'],f"T{r['type']}")] = r['count']
-            summary['calls']['counts'] = ctc; summary['calls']['status'] = f"Processed (Total: {sum(ctc.values())})"
+            summary['calls']['counts']=ctc; summary['calls']['status']=f"Processed (Total: {sum(ctc.values())})"
             cursor.execute("SELECT name, number, date, duration, type FROM calls ORDER BY date DESC LIMIT ?", (max_sample_items,))
-            for r in cursor.fetchall(): summary['calls']['samples'].append({'name':html_escape(r['name']), 'number':html_escape(r['number']), 'date':format_timestamp_for_report(epoch_milliseconds_to_datetime(r['date'])), 'duration':r['duration'], 'type':ctm.get(r['type'],f"T{r['type']}")})
+            for r in cursor.fetchall(): summary['calls']['samples'].append({'name':html_escape(r['name']),'number':html_escape(r['number']),'date':format_timestamp_for_report(epoch_milliseconds_to_datetime(r['date'])),'duration':r['duration'],'type':ctm.get(r['type'],f"T{r['type']}")})
             conn.close()
-        except sqlite3.Error as e: summary['calls']['status'] = f"Error: {html_escape(e)}"
+        except sqlite3.Error as e:
+            summary['calls']['status']=f"Error: {html_escape(e)}"
+            if verbose_flag_for_parsers: print(f"Error processing CallLog DB {calllog_db_path}: {e}", file=sys.stderr)
     return summary
 
 def gather_browsing_summary(input_dir, max_sample_items=5):
@@ -326,65 +261,45 @@ def gather_browsing_summary(input_dir, max_sample_items=5):
     history_db_path = os.path.join(input_dir, "Browser Data", "Chrome", "History")
     if os.path.exists(history_db_path):
         try:
-            conn = sqlite3.connect(f'file:{history_db_path}?mode=ro', uri=True)
-            conn.row_factory = sqlite3.Row; cursor = conn.cursor()
-            r=cursor.fetchone(); summary['chrome_history']['total_urls'] = r['count'] if cursor.execute("SELECT COUNT(*) as count FROM urls") and r else 0
-            r=cursor.fetchone(); summary['chrome_history']['total_visits'] = r['sum_visits'] or 0 if cursor.execute("SELECT SUM(visit_count) as sum_visits FROM urls") and r else 0
-            summary['chrome_history']['status'] = f"Processed (URLs: {summary['chrome_history']['total_urls']}, Visits: {summary['chrome_history']['total_visits']})"
+            conn=sqlite3.connect(f'file:{history_db_path}?mode=ro',uri=True);conn.row_factory=sqlite3.Row;cursor=conn.cursor()
+            cursor.execute("SELECT COUNT(*) as count FROM urls");r=cursor.fetchone();summary['chrome_history']['total_urls']=r['count'] if r else 0
+            cursor.execute("SELECT SUM(visit_count) as sum_visits FROM urls");r=cursor.fetchone();summary['chrome_history']['total_visits']=r['sum_visits'] or 0 if r else 0
+            summary['chrome_history']['status']=f"Processed (URLs: {summary['chrome_history']['total_urls']}, Visits: {summary['chrome_history']['total_visits']})"
             cursor.execute("SELECT url, title, visit_count FROM urls ORDER BY visit_count DESC LIMIT ?", (max_sample_items,))
-            for r in cursor.fetchall(): summary['chrome_history']['top_sites'].append({'url':r['url'], 'title':r['title'], 'visit_count':r['visit_count']})
+            for r in cursor.fetchall(): summary['chrome_history']['top_sites'].append({'url':r['url'],'title':r['title'],'visit_count':r['visit_count']})
             cursor.execute("SELECT url, title, last_visit_time FROM urls ORDER BY last_visit_time DESC LIMIT ?", (max_sample_items,))
-            for r in cursor.fetchall(): summary['chrome_history']['recent_sites'].append({'url':r['url'], 'title':r['title'], 'last_visit_time':format_timestamp_for_report(webkit_to_datetime(r['last_visit_time']))})
+            for r in cursor.fetchall(): summary['chrome_history']['recent_sites'].append({'url':r['url'],'title':r['title'],'last_visit_time':format_timestamp_for_report(webkit_to_datetime(r['last_visit_time']))})
             conn.close()
-        except sqlite3.Error as e: summary['chrome_history']['status'] = f"Error: {html_escape(e)}"
+        except sqlite3.Error as e:
+            summary['chrome_history']['status']=f"Error: {html_escape(e)}"
+            if verbose_flag_for_parsers: print(f"Error processing Chrome History DB {history_db_path}: {e}", file=sys.stderr)
     return summary
 
 # --- Main Report Generation Logic ---
 def main():
-    parser = setup_parser()
-    args = parser.parse_args()
+    global verbose_flag_for_parsers
+    parser = setup_parser(); args = parser.parse_args()
+    if args.verbose: verbose_flag_for_parsers = True
+    if not os.path.isdir(args.input_dir): print(f"Error: Input directory '{args.input_dir}' not found.", file=sys.stderr); sys.exit(1)
+    output_fn = args.output if args.output else f"report_{os.path.basename(os.path.normpath(args.input_dir))}.html"
+    title_str = args.title if args.title else f"Android Artifact Report: {os.path.basename(os.path.normpath(args.input_dir))}"
+    dev_id_str = os.path.basename(os.path.normpath(args.input_dir))
+    time_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S %Z')
+    if verbose_flag_for_parsers: print(f"Report Title: {title_str}\nOutput File: {output_fn}\nMax Samples: {args.max_sample_items}\n"+"-"*30, file=sys.stderr)
 
-    if not os.path.isdir(args.input_dir):
-        print(f"Error: Input directory '{args.input_dir}' not found or is not a directory.", file=sys.stderr)
-        sys.exit(1)
+    dev_data=gather_device_info(args.input_dir); key_files=gather_key_files_status(args.input_dir)
+    comm_sum=gather_communications_summary(args.input_dir,args.max_sample_items); browse_sum=gather_browsing_summary(args.input_dir,args.max_sample_items)
 
-    output_filename = args.output if args.output else f"report_{os.path.basename(os.path.normpath(args.input_dir))}.html"
-    report_title_str = args.title if args.title else f"Android Artifact Report: {os.path.basename(os.path.normpath(args.input_dir))}"
-    device_id_str = os.path.basename(os.path.normpath(args.input_dir))
-    report_time_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S %Z')
-
-    # Gather all data
-    device_data = gather_device_info(args.input_dir)
-    key_files_data = gather_key_files_status(args.input_dir)
-    comm_summary = gather_communications_summary(args.input_dir, args.max_sample_items)
-    browsing_summary = gather_browsing_summary(args.input_dir, args.max_sample_items)
-
-    # Start HTML content
-    html_content = HTML_HEADER_TEMPLATE.format(
-        title=html_escape(report_title_str),
-        report_generation_time=html_escape(report_time_str),
-        input_dir_html=html_escape(args.input_dir),
-        device_id_html=html_escape(device_id_str)
-    )
-
-    # Add sections
-    html_content += generate_html_section("Device Information", generate_device_info_html(device_data), "device-info")
-    html_content += generate_html_section("Key Artifacts Status", generate_key_files_status_html(key_files_data), "key-files-status")
-    html_content += generate_html_section("Communications Summary", generate_communications_summary_html(comm_summary, args.max_sample_items), "communications-summary")
-    html_content += generate_html_section("Browsing Summary (Chrome)", generate_browsing_summary_html(browsing_summary, args.max_sample_items), "browsing-summary")
-
-    # (Add more sections here as more gatherers are implemented)
-
-    html_content += HTML_FOOTER
-
-    # Write HTML file
+    html_c = HTML_HEADER_TEMPLATE.format(title=html_escape(title_str),report_generation_time=html_escape(time_str),input_dir_html=html_escape(args.input_dir),device_id_html=html_escape(dev_id_str))
+    html_c += generate_html_section("Device Information", generate_device_info_html(dev_data), "device-info")
+    html_c += generate_html_section("Key Artifacts Status", generate_key_files_status_html(key_files), "key-files-status")
+    html_c += generate_html_section("Communications Summary", generate_communications_summary_html(comm_sum, args.max_sample_items), "comms-summary")
+    html_c += generate_html_section("Browsing Summary (Chrome)", generate_browsing_summary_html(browse_sum, args.max_sample_items), "browse-summary")
+    html_c += HTML_FOOTER
     try:
-        with open(output_filename, 'w', encoding='utf-8') as f_out:
-            f_out.write(html_content)
-        print(f"HTML report generated: {os.path.abspath(output_filename)}")
-    except IOError as e:
-        print(f"Error writing HTML report to '{output_filename}': {e}", file=sys.stderr)
-        sys.exit(1)
+        with open(output_fn, 'w', encoding='utf-8') as f: f.write(html_c)
+        print(f"HTML report generated: {os.path.abspath(output_fn)}")
+    except IOError as e: print(f"Error writing HTML report to '{output_fn}': {e}", file=sys.stderr); sys.exit(1)
 
 if __name__ == '__main__':
     main()
