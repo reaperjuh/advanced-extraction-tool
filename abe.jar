@@ -1,0 +1,5 @@
+This is a dummy abe.jar for testing purposes.
+It is not a functional Android Backup Extractor.
+If AegisExtractor attempts to use this, it will likely fail during the unpack step,
+which is expected behavior for testing the script's error handling.
+The real abe.jar should be obtained from its official source.
