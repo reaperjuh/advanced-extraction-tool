@@ -171,13 +171,13 @@ This command is used to verify the integrity of files against a provided hash li
     python hash_verifier.py hash ./my_project_files --output project_hashes.sha256 --hashtype sha256
     ```
 
-2.  **Verify files based on `project_hashes.sha256` located in the current directory. Files listed in `project_hashes.sha256` are relative to `./my_project_files`:**
+2.  **Verify files based on `project_hashes.sha256`. Assumes `project_hashes.sha256` is in the current directory and files listed within it are relative to `./my_project_files`:**
     ```bash
     python hash_verifier.py verify ./project_hashes.sha256 --base-dir ./my_project_files
     ```
-    Alternatively, if `project_hashes.sha256` was inside `my_project_files` and paths were relative to that:
+    If `project_hashes.sha256` was in `output/` and paths inside it were relative to `my_project_files` (which was in the CWD):
     ```bash
-    python hash_verifier.py verify ./my_project_files/project_hashes.sha256
+    python hash_verifier.py verify ./output/project_hashes.sha256 --base-dir ./my_project_files
     ```
 
 3.  **Generate MD5 hashes for a single file `archive.zip` and print to console:**
@@ -185,9 +185,62 @@ This command is used to verify the integrity of files against a provided hash li
     python hash_verifier.py hash ./archive.zip --hashtype md5
     ```
 
-4.  **Verify files from a hash list `server_checksums.txt` where the hash type is known to be SHA1 but might be missing from the header:**
+The `verify` command will output the status for each file (OK, FAILED, NOT_FOUND, HASH_ERROR, IS_DIRECTORY) and a final summary.
+
+## Timeline Generator (`timeline_generator.py`)
+
+**Overview:**
+`timeline_generator.py` processes directories of files (typically extracted Android artifacts) to create a chronological timeline of events. It currently focuses on parsing filesystem metadata (modification, access, change, and birth times) and is designed to be extensible with more artifact-specific parsers (e.g., for application databases, logs).
+
+**Input:**
+The script expects an input directory (`input_dir`) which should contain the files you want to analyze. This is typically a directory created by `artifact_extractor.py` (e.g., `extraction_output/device_id/`) or any other collection of files for which you want to generate a timeline based on their metadata.
+
+**Output Formats:**
+The generated timeline can be saved in several formats, determined by the extension of the `--output` filename:
+*   `.csv` (Default): Comma Separated Values. Includes a header row and is suitable for import into spreadsheets or other analysis tools.
+*   `.txt`: Human-readable plain text, with fields separated by `|`.
+*   `.jsonl`: JSON Lines, where each event is a JSON object on a new line. This format is useful for programmatic processing.
+If no extension or an unsupported extension is provided for the output file, it defaults to `.txt`. The default output filename is `timeline.csv`.
+
+**Command-Line Arguments:**
+
+*   `input_dir`: (Positional, Required) The path to the input directory containing files to be processed.
+*   `--output OUTPUT_FILE`: (Optional) Specifies the name and format of the output file. Defaults to `timeline.csv`.
+*   `--start-date YYYY-MM-DD[THH:MM:SS]`: (Optional) Filters events to include only those occurring on or after this UTC date/time.
+*   `--end-date YYYY-MM-DD[THH:MM:SS]`: (Optional) Filters events to include only those occurring on or before this UTC date/time. If only a date is given (YYYY-MM-DD), it's treated as the end of that day.
+*   `--logcat-year YEAR`: (Optional) Year to assume for Logcat entries if their timestamps don't include a year. (For future Logcat parser)
+*   `--logcat-timezone TZ_NAME`: (Optional) Source timezone for Logcat entries (e.g., 'America/New_York'). Defaults to 'UTC'. (For future Logcat parser)
+*   `--fs-timestamps {m,a,c,b,all}`: (Optional) Comma-separated list of filesystem timestamps to include:
+    *   `m`: Modification time
+    *   `a`: Access time
+    *   `c`: Metadata change time (or creation time on Windows)
+    *   `b`: Birth/Creation time (if available on the OS)
+    *   `all`: Equivalent to "m,a,c,b"
+    Defaults to `"m,c,a,b"`.
+*   `-v, --verbose`: (Optional) Enables verbose output, showing more details about the processing steps.
+
+**Supported Artifacts (Current):**
+
+*   **File System Metadata:** The script currently extracts and processes the following timestamps from files found in the input directory:
+    *   Modification Time (mtime)
+    *   Access Time (atime)
+    *   Metadata Change Time (ctime) - Note: On Windows, this is the Creation Time.
+    *   Birth/Creation Time (btime) - If available on the operating system (e.g., macOS, some Linux filesystems).
+*   **Future Support:** The script is designed to be extended. Parsers for specific Android artifacts like application databases (e.g., SMS, contacts), browser history, Logcat files, and more will be added in future updates. These will be integrated into the main file walk and event collection process.
+
+**Examples:**
+
+1.  **Generate a timeline from `./extracted_device_data/` and save to the default `timeline.csv`:**
     ```bash
-    python hash_verifier.py verify ./server_checksums.txt --base-dir /mnt/server_backup --hashtype sha1
+    python timeline_generator.py ./extracted_device_data/
     ```
 
-The `verify` command will output the status for each file (OK, FAILED, NOT_FOUND, HASH_ERROR, IS_DIRECTORY) and a final summary.
+2.  **Generate a timeline, filtering for events between 2023-01-15 (inclusive) and 2023-01-16 at noon (inclusive), and output to `events_jan15_16.txt`:**
+    ```bash
+    python timeline_generator.py ./extracted_device_data/ --start-date 2023-01-15 --end-date 2023-01-16T12:00:00 --output events_jan15_16.txt
+    ```
+
+3.  **Generate a timeline including only file modification and access timestamps, saving as JSON Lines:**
+    ```bash
+    python timeline_generator.py ./extracted_device_data/ --fs-timestamps m,a --output fs_mac_timeline.jsonl
+    ```
